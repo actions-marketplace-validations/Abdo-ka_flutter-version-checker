@@ -1,0 +1,50 @@
+name: 🚀 Flutter Version Control & Tag Management
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+      - production
+
+jobs:
+  version_check_and_tag:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+    
+    steps:
+      - name: ⬇️ Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for tags
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: 🔍 Version Check & Auto-Tag
+        id: version-check
+        uses: Abdo-ka/flutter-version-checker@v2
+        with:
+          branch: ${{ github.ref_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "🔧 Auto-increment version [skip ci]"
+      
+      - name: 📋 Version Summary
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📦 Previous Version: ${{ steps.version-check.outputs.previous-version }}"
+          echo "📦 Current Version: ${{ steps.version-check.outputs.current-version }}"
+          echo "🔄 Version Updated: ${{ steps.version-check.outputs.version-updated }}"
+          echo "✨ New Version: ${{ steps.version-check.outputs.new-version }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      
+      # If version was updated, checkout the latest commit to continue with updated version
+      - name: 🔄 Refresh Checkout
+        if: steps.version-check.outputs.version-updated == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+      
+      # Continue with your build/deploy process here
+      # The version is now guaranteed to be properly tagged and incremented

@@ -36730,7 +36730,7 @@ const yaml = __nccwpck_require__(4281);
 const semver = __nccwpck_require__(2088);
 
 /**
- * Parse a Flutter version string (e.g., "50.8.47+177")
+ * Parse a Flutter version string (e.g., "1.0.0+1")
  * @param {string} versionStr - The version string
  * @returns {object} - Parsed version object
  */
@@ -36777,7 +36777,7 @@ function compareVersions(current, previous) {
 }
 
 /**
- * Generate next version based on previous version
+ * Generate next version by incrementing patch and build number
  * @param {string} previousVersion - The previous version
  * @returns {string} - The next version
  */
@@ -36828,6 +36828,7 @@ function updatePubspecVersion(pubspecPath, newVersion) {
     });
     
     fs.writeFileSync(pubspecPath, newContent, 'utf8');
+    core.info(`✅ Updated pubspec.yaml with version: ${newVersion}`);
     return true;
   } catch (error) {
     core.error(`Error updating pubspec.yaml: ${error.message}`);
@@ -36860,115 +36861,45 @@ async function execGit(args, throwOnError = false) {
   
   const exitCode = await exec.exec('git', args, options);
   
-  if (exitCode !== 0) {
-    const message = `Git command failed: git ${args.join(' ')}\nError: ${error}`;
-    if (throwOnError) {
-      throw new Error(message);
-    }
-    core.warning(message);
-    return '';
+  if (exitCode !== 0 && throwOnError) {
+    throw new Error(`Git command failed: git ${args.join(' ')}\nError: ${error}`);
   }
   
   return output.trim();
 }
 
 /**
- * Find previous version in branch history
- * @param {string} branch - Target branch name
- * @param {string} currentVersion - Current version to exclude
- * @returns {string|null} - Previous version or null
+ * Get the latest tag from git
+ * @returns {string|null} - Latest tag version or null if no tags exist
  */
-async function findPreviousVersion(branch, currentVersion) {
+async function getLatestTag() {
   try {
-    // First, ensure we have the latest changes from the remote branch
-    core.info(`Fetching latest changes from origin/${branch}...`);
+    // Fetch all tags from remote
+    await execGit(['fetch', '--tags'], false);
     
-    // Try to unshallow if repository is shallow
-    const isShallow = await execGit(['rev-parse', '--is-shallow-repository']);
-    if (isShallow === 'true') {
-      core.info('Repository is shallow, attempting to unshallow...');
-      await execGit(['fetch', '--unshallow'], false);
-    }
+    // Get the latest tag sorted by version
+    const tags = await execGit(['tag', '--sort=-version:refname'], false);
     
-    // Fetch the target branch (just update remote references, don't create local branch)
-    await execGit(['fetch', 'origin', branch], false);
-    
-    core.info(`Searching for previous version in ${branch} branch history...`);
-    
-    // Get the commit history for the target branch
-    const commitHashes = await execGit(['rev-list', `origin/${branch}`, '--max-count=100']);
-    if (!commitHashes) {
-      core.warning('No commit history found');
+    if (!tags) {
+      core.info('No previous tags found - this is the first release');
       return null;
     }
     
-    const commits = commitHashes.split('\n').filter(hash => hash.trim());
-    core.info(`Checking ${commits.length} commits for version history...`);
+    // Get the first tag (latest)
+    const latestTag = tags.split('\n')[0].trim();
     
-    let sameVersionCount = 0;
-    let foundVersions = [];
-    
-    for (const commitHash of commits) {
-      if (!commitHash.trim()) continue;
-      
-      try {
-        // Get pubspec.yaml content from this commit
-        const pubspecContent = await execGit(['show', `${commitHash}:pubspec.yaml`]);
-        if (!pubspecContent) continue;
-        
-        const doc = yaml.load(pubspecContent);
-        const commitVersion = doc.version;
-        
-        if (commitVersion) {
-          foundVersions.push({
-            version: commitVersion,
-            commit: commitHash.substring(0, 8)
-          });
-          
-          if (commitVersion === currentVersion) {
-            sameVersionCount++;
-            core.info(`Found same version: ${commitVersion} (commit ${commitHash.substring(0, 8)}) - Count: ${sameVersionCount}`);
-          } else {
-            // Found a different version
-            core.info(`Found different version: ${commitVersion} (commit ${commitHash.substring(0, 8)})`);
-            
-            // If we found multiple commits with the same version, this indicates version reuse
-            if (sameVersionCount > 1) {
-              core.warning(`⚠️ Version ${currentVersion} was found in ${sameVersionCount} commits! This indicates version reuse.`);
-              core.info(`📋 Returning current version as previous to force increment: ${currentVersion}`);
-              return currentVersion; // This will trigger auto-increment
-            }
-            
-            core.info(`Found previous version: ${commitVersion} (from commit ${commitHash.substring(0, 8)})`);
-            return commitVersion;
-          }
-        }
-      } catch (error) {
-        // Skip invalid YAML or missing files
-        continue;
-      }
+    if (!latestTag) {
+      core.info('No previous tags found - this is the first release');
+      return null;
     }
     
-    // If we only found the same version multiple times and no different version
-    if (sameVersionCount > 1) {
-      core.warning(`⚠️ Found ${sameVersionCount} commits with the same version ${currentVersion}!`);
-      core.info(`📋 Version reuse detected. Returning current version to force increment.`);
-      return currentVersion; // This will trigger auto-increment
-    }
+    // Remove 'v' prefix if present
+    const version = latestTag.startsWith('v') ? latestTag.substring(1) : latestTag;
+    core.info(`📌 Found latest tag: ${latestTag} (version: ${version})`);
     
-    // If we only found one instance of the current version, look for the last different version
-    if (foundVersions.length > 0) {
-      const lastDifferentVersion = foundVersions.find(v => v.version !== currentVersion);
-      if (lastDifferentVersion) {
-        core.info(`Found last different version: ${lastDifferentVersion.version} (commit ${lastDifferentVersion.commit})`);
-        return lastDifferentVersion.version;
-      }
-    }
-    
-    core.info('No previous version found in commit history');
-    return null;
+    return version;
   } catch (error) {
-    core.warning(`Error finding previous version: ${error.message}`);
+    core.warning(`Error getting latest tag: ${error.message}`);
     return null;
   }
 }
@@ -36981,73 +36912,98 @@ async function configureGit(token) {
   try {
     // Configure git user
     await execGit(['config', '--local', 'user.email', 'action@github.com'], true);
-    await execGit(['config', '--local', 'user.name', 'GitHub Action Auto-Fix'], true);
+    await execGit(['config', '--local', 'user.name', 'GitHub Action'], true);
     
-    // Configure authentication if token is provided
+    // Configure authentication
     if (token) {
       const remoteUrl = await execGit(['config', '--get', 'remote.origin.url']);
       if (remoteUrl) {
-        // Extract repository info from URL
         const match = remoteUrl.match(/github\.com[\/:](.+?)(?:\.git)?$/);
         if (match) {
           const repo = match[1];
           const authenticatedUrl = `https://x-access-token:${token}@github.com/${repo}.git`;
           await execGit(['remote', 'set-url', 'origin', authenticatedUrl], true);
-          core.info('Git authentication configured');
+          core.info('✅ Git authentication configured');
         }
       }
     }
   } catch (error) {
-    core.warning(`Failed to configure git: ${error.message}`);
+    core.error(`Failed to configure git: ${error.message}`);
     throw error;
   }
 }
 
 /**
- * Commit and push version changes with tag
+ * Create and push a git tag
+ * @param {string} version - Version to tag
+ * @param {string} token - GitHub token
+ */
+async function createAndPushTag(version, token) {
+  try {
+    await configureGit(token);
+    
+    const tagName = `v${version}`;
+    
+    // Check if tag already exists
+    const existingTag = await execGit(['tag', '-l', tagName], false);
+    if (existingTag) {
+      core.info(`ℹ️  Tag ${tagName} already exists, skipping tag creation`);
+      return;
+    }
+    
+    core.info(`🏷️  Creating tag ${tagName}...`);
+    await execGit(['tag', '-a', tagName, '-m', `Release ${tagName}`], true);
+    
+    core.info(`📤 Pushing tag ${tagName}...`);
+    await execGit(['push', 'origin', tagName], true);
+    
+    core.info(`✅ Successfully created and pushed tag ${tagName}`);
+  } catch (error) {
+    core.error(`Failed to create/push tag: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Commit and push version changes, then create tag
  * @param {string} branch - Target branch
  * @param {string} newVersion - New version
  * @param {string} previousVersion - Previous version
  * @param {string} customMessage - Custom commit message
  * @param {string} token - GitHub token
  */
-async function commitAndPush(branch, newVersion, previousVersion, customMessage, token) {
+async function commitPushAndTag(branch, newVersion, previousVersion, customMessage, token) {
   try {
     await configureGit(token);
     
-    const commitMessage = customMessage || `Auto-increment version to ${newVersion}
+    const commitMessage = customMessage || `🔧 Auto-increment version to ${newVersion}
 
 Previous version: ${previousVersion}
 New version: ${newVersion}
-Auto-generated by GitHub Actions`;
+[skip ci]`;
 
     // Check if there are changes to commit
     const status = await execGit(['status', '--porcelain']);
     if (!status) {
-      core.info('No changes to commit');
+      core.info('ℹ️  No changes to commit');
       return;
     }
 
-    core.info('Staging pubspec.yaml changes...');
+    core.info('📝 Staging pubspec.yaml...');
     await execGit(['add', 'pubspec.yaml'], true);
     
-    core.info('Committing version update...');
+    core.info('💾 Committing version update...');
     await execGit(['commit', '-m', commitMessage], true);
     
-    // Create and push tag
-    const tagName = `v${newVersion}`;
-    core.info(`Creating tag ${tagName}...`);
-    await execGit(['tag', '-a', tagName, '-m', `Release ${tagName}`], true);
-    
-    core.info(`Pushing changes to ${branch}...`);
+    core.info(`📤 Pushing to ${branch}...`);
     await execGit(['push', 'origin', `HEAD:${branch}`], true);
     
-    core.info(`Pushing tag ${tagName}...`);
-    await execGit(['push', 'origin', tagName], true);
+    // Create and push tag
+    await createAndPushTag(newVersion, token);
     
-    core.info('Successfully pushed version update and tag');
+    core.info('✅ Successfully committed, pushed, and tagged');
   } catch (error) {
-    core.error(`Failed to commit and push: ${error.message}`);
+    core.error(`Failed to commit/push: ${error.message}`);
     throw error;
   }
 }
@@ -37061,14 +37017,14 @@ async function run() {
     const branch = core.getInput('branch') || 'main';
     const token = core.getInput('token');
     const customMessage = core.getInput('commit-message');
-    const pubspecPath = 'pubspec.yaml'; // Always in project root
+    const pubspecPath = 'pubspec.yaml';
     
-    core.info(`🚀 Flutter Version Checker & Auto-Increment Action`);
-    core.info(`📋 Checking version in ${pubspecPath} against ${branch} branch...`);
+    core.info('🚀 Flutter Version Checker & Auto-Increment Action');
+    core.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     
-    // Validate required inputs
+    // Validate token
     if (!token) {
-      core.setFailed('GitHub token is required. Please provide the token input.');
+      core.setFailed('❌ GitHub token is required');
       return;
     }
     
@@ -37078,7 +37034,7 @@ async function run() {
       return;
     }
     
-    // Get current version
+    // Get current version from pubspec.yaml
     const currentVersion = getCurrentVersion(pubspecPath);
     if (!currentVersion) {
       core.setFailed('❌ Could not read version from pubspec.yaml');
@@ -37087,34 +37043,41 @@ async function run() {
     
     core.info(`📦 Current version in pubspec.yaml: ${currentVersion}`);
     
-    // Find previous version in branch history
-    const previousVersion = await findPreviousVersion(branch, currentVersion);
+    // Get latest tag from git
+    const previousTagVersion = await getLatestTag();
     
-    // Set outputs
-    core.setOutput('previous-version', previousVersion || 'none');
-    core.setOutput('current-version', currentVersion);
-    
-    if (!previousVersion) {
-      core.info('✅ Version check passed! No previous version found (first build).');
+    // SCENARIO 1: First time - No previous tags exist
+    if (!previousTagVersion) {
+      core.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      core.info('📌 SCENARIO: First Release');
+      core.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      core.info(`✅ Creating initial tag with version: ${currentVersion}`);
+      
+      await createAndPushTag(currentVersion, token);
+      
+      core.setOutput('previous-version', 'none');
+      core.setOutput('current-version', currentVersion);
       core.setOutput('version-updated', 'false');
+      core.setOutput('new-version', currentVersion);
+      
+      core.info('🎉 Initial tag created successfully!');
       return;
     }
+    
+    core.info(`� Previous tag version: ${previousTagVersion}`);
+    core.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     
     // Compare versions
-    const comparison = compareVersions(currentVersion, previousVersion);
+    const comparison = compareVersions(currentVersion, previousTagVersion);
     
-    core.info(`🔍 Comparing version numbers...`);
-    core.info(`   📋 Current version: ${currentVersion}`);
-    core.info(`   📋 Previous version: ${previousVersion}`);
-    
-    // Special case: if current version equals previous version, it indicates version reuse
-    if (currentVersion === previousVersion) {
-      core.warning(`⚠️  Version reuse detected! Version ${currentVersion} was already used in previous commits.`);
-      core.info('🔧 Auto-fixing version number due to version reuse...');
+    // SCENARIO 2: Same version - Update and create new tag
+    if (comparison === 0) {
+      core.info('� SCENARIO: Version is SAME as previous tag');
+      core.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      core.warning(`⚠️  Version ${currentVersion} equals previous tag ${previousTagVersion}`);
       
-      // Generate new version based on current version
       const newVersion = generateNextVersion(currentVersion);
-      core.info(`📈 Auto-incrementing version: ${currentVersion} → ${newVersion}`);
+      core.info(`� Auto-incrementing: ${currentVersion} → ${newVersion}`);
       
       // Update pubspec.yaml
       if (!updatePubspecVersion(pubspecPath, newVersion)) {
@@ -37122,36 +37085,26 @@ async function run() {
         return;
       }
       
-      // Verify the change
-      const updatedVersion = getCurrentVersion(pubspecPath);
-      core.info(`✅ Updated pubspec.yaml with version: ${updatedVersion}`);
+      // Commit, push, and create tag
+      await commitPushAndTag(branch, newVersion, currentVersion, customMessage, token);
       
-      // Commit and push changes
-      await commitAndPush(branch, newVersion, currentVersion, customMessage, token);
-      
-      core.info('🎉 Version has been auto-incremented due to reuse and committed.');
-      core.info(`🚀 The workflow will now continue with the new version: ${newVersion}`);
-      
-      // Set outputs
+      core.setOutput('previous-version', previousTagVersion);
+      core.setOutput('current-version', newVersion);
       core.setOutput('version-updated', 'true');
       core.setOutput('new-version', newVersion);
-      core.setOutput('current-version', newVersion);
+      
+      core.info('🎉 Version updated, committed, pushed, and tagged!');
       return;
     }
     
-    if (comparison > 0) {
-      core.info('✅ Version check passed! Current version is greater than previous.');
-      core.setOutput('version-updated', 'false');
-      return;
-    }
-    
+    // SCENARIO 3: Lower version - Update and create new tag
     if (comparison < 0) {
-      core.warning(`⚠️  Version ${currentVersion} is lower than previous version ${previousVersion}!`);
-      core.info('🔧 Auto-fixing version number...');
+      core.info('📌 SCENARIO: Version is LOWER than previous tag');
+      core.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      core.warning(`⚠️  Version ${currentVersion} is lower than previous tag ${previousTagVersion}`);
       
-      // Generate new version
-      const newVersion = generateNextVersion(previousVersion);
-      core.info(`📈 Auto-incrementing version: ${currentVersion} → ${newVersion}`);
+      const newVersion = generateNextVersion(previousTagVersion);
+      core.info(`� Auto-incrementing: ${currentVersion} → ${newVersion}`);
       
       // Update pubspec.yaml
       if (!updatePubspecVersion(pubspecPath, newVersion)) {
@@ -37159,20 +37112,34 @@ async function run() {
         return;
       }
       
-      // Verify the change
-      const updatedVersion = getCurrentVersion(pubspecPath);
-      core.info(`✅ Updated pubspec.yaml with version: ${updatedVersion}`);
+      // Commit, push, and create tag
+      await commitPushAndTag(branch, newVersion, previousTagVersion, customMessage, token);
       
-      // Commit and push changes
-      await commitAndPush(branch, newVersion, previousVersion, customMessage, token);
-      
-      core.info('🎉 Version has been auto-incremented and committed.');
-      core.info(`🚀 The workflow will now continue with the new version: ${newVersion}`);
-      
-      // Set outputs
+      core.setOutput('previous-version', previousTagVersion);
+      core.setOutput('current-version', newVersion);
       core.setOutput('version-updated', 'true');
       core.setOutput('new-version', newVersion);
-      core.setOutput('current-version', newVersion);
+      
+      core.info('🎉 Version updated, committed, pushed, and tagged!');
+      return;
+    }
+    
+    // SCENARIO 4: Higher version - Just create tag
+    if (comparison > 0) {
+      core.info('📌 SCENARIO: Version is HIGHER than previous tag');
+      core.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      core.info(`✅ Version ${currentVersion} is higher than previous tag ${previousTagVersion}`);
+      core.info('📝 No version bump needed, creating tag only...');
+      
+      await createAndPushTag(currentVersion, token);
+      
+      core.setOutput('previous-version', previousTagVersion);
+      core.setOutput('current-version', currentVersion);
+      core.setOutput('version-updated', 'false');
+      core.setOutput('new-version', currentVersion);
+      
+      core.info('🎉 Tag created successfully!');
+      return;
     }
     
   } catch (error) {

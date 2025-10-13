@@ -1,5 +1,24 @@
 # Flutter Version Checker - Release History
 
+## v2.5.0 (2025-10-13)
+
+## What's Changed
+
+### Commits since v2.4.3+2:
+- 🎯 Major refactor: Simplify to tag-based version control (9203009)
+
+## Features
+
+## Bug Fixes
+
+## Improvements
+- 🎯 Major refactor: Simplify to tag-based version control
+
+---
+**Full Changelog**: https://github.com/Abdo-ka/flutter-version-checker/compare/v2.4.3+2...v2.5.0
+
+
+
 ## v1.0.3+7 (2025-10-03)
 
 ## What's Changed
